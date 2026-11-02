@@ -1,0 +1,141 @@
+* =====================================================================================
+*  rig_power_stage.cir  -  LTspice netlist of the no-PCB rig power stage
+*  iGL-FOC-1 · BOOSTXL-DRV8323RS bridge + 5010 motor + bench PSU + regen kit
+* =====================================================================================
+*
+*  STATUS: written to the same parameters as rig_sim.py. It has NOT been run here
+*  (no LTspice on this PC). The first person to run it: check the .meas results in the
+*  log against the expectations at the bottom of this file, and note the LTspice version.
+*  .param names inside behavioural (B) expressions are written in braces {..} so LTspice
+*  substitutes the numbers before parsing (works in LTspice IV, XVII and 24).
+*
+*  HOW TO RUN
+*    1. Install LTspice (free, Analog Devices).
+*    2. File > Open > choose "All files (*.*)" > open this .cir file.
+*    3. Press Run. Plot V(vbus), I(Ra), I(Rb), I(Rc), I(R1), V(sa).
+*    4. View > SPICE Error Log (Ctrl+L) shows the .meas results.
+*
+*  WHAT IT MODELS (switching level, open loop)
+*    PSU (VPSU, RSRC) -> Schottky D1 -> bus node "vbus" with C3, C4 (regen kit),
+*    BOOSTXL bulk C, TVS D2, quiescent load -> three half-bridges (ideal switches with
+*    R_on + body diodes) with centre-aligned PWM and dead time -> low-side shunts ->
+*    motor phases (R + L + sinusoidal back-EMF, star point floating).
+*    There is NO FOC controller here: the duty cycles are sinusoidal references with an
+*    amplitude M and a phase PHI relative to the back-EMF. That is enough to study ripple,
+*    dead time, shunt waveforms, and bus behaviour in motoring and in braking.
+*    For closed-loop behaviour use rig_sim.py.
+*
+*  SIGN CONVENTION (same as rig_sim.py)
+*    Phase-a back-EMF  e_a = -EPK * sin(theta),  theta = 2*pi*FE*t  (b, c at -/+120 deg)
+*    Voltage reference  v_a ~ M * sin(theta + PHI)
+*    PHI = 180 deg puts the voltage in phase with the back-EMF:
+*        M*VBUS/2 > EPK  -> current flows into the motor  (MOTORING)
+*        M*VBUS/2 < EPK  -> current flows back into the bus (BRAKING / REGEN)
+*
+*  SCENARIOS (edit the .param lines below)
+*    A  motoring (default)   FE=100 M=0.20 PHI=180  -> ~2.4 V applied vs 1.77 V EMF
+*    B  braking / regen      FE=100 M=0.10 PHI=180  -> ~1.2 V applied vs 1.77 V EMF; V(vbus) rises
+*    C  no regen kit         as B with CKIT=1n      -> bus held only by CBOARD: faster rise
+*    D  dead-time study      TDEAD=0 / 200n / 500n  -> compare I(Ra) distortion near zero crossings
+* =====================================================================================
+
+* ---------- parameters (same names and defaults as rig_sim.py) ----------
+.param VPSU=24        ; V, bench supply
+.param RSRC=50m       ; ohm, PSU + harness + fuse
+.param CKIT=4400u     ; F, C3 + C4 (2 x 2200 uF); set 1n for "no regen kit"
+.param CBOARD=100u    ; F, BOOSTXL bulk capacitance (PLACEHOLDER: read TI SLVC690)
+.param FPWM=40k       ; Hz, centre-aligned PWM
+.param TDEAD=200n     ; s, dead time
+.param RON=2m         ; ohm, FET on-resistance
+.param RSH=7m         ; ohm, shunt (PLACEHOLDER: read TI SLVC690)
+.param RPH=0.1        ; ohm, motor phase resistance (PLACEHOLDER until test T10)
+.param LPH=40u        ; H, motor phase inductance (PLACEHOLDER until test T10)
+.param PSI=2.813m     ; Wb, magnet flux linkage for 280 KV, 7 pole pairs (rig_sim.py: motor.psi())
+.param FE=100         ; Hz, electrical frequency (100 Hz = 89.8 rad/s mechanical)
+.param M=0.20         ; modulation: phase-voltage amplitude = M * VBUS / 2
+.param PHI=180        ; deg, voltage angle relative to the back-EMF
+.param EPK={PSI*2*pi*FE}          ; V, back-EMF amplitude per phase
+.param DELTA={2*TDEAD*FPWM}       ; dead time expressed in carrier units (carrier slope = 2*FPWM per s)
+.param TSTOP=30m
+
+* ---------- supply, Schottky, bus capacitors, TVS ----------
+V1 psu 0 {VPSU}
+R1 psu psu1 {RSRC}
+D1 psu1 vbus DSCH                    ; MBR2045CT: blocks current back into the PSU
+C3 vbus 0 {CKIT/2} Rser=30m
+C4 vbus 0 {CKIT/2} Rser=30m
+Cb vbus 0 {CBOARD} Rser=20m
+D2 0 vbus DTVS                       ; SMCJ28A: cathode on vbus, anode on 0
+Rq vbus 0 800                        ; ~30 mA quiescent load of the BOOSTXL
+.ic V(vbus)={VPSU-0.4}               ; start with the bus charged (no inrush transient)
+
+* ---------- PWM carrier and duty references ----------
+* Triangle 0 -> 1 -> 0 over one PWM period. High-side FET on while duty > carrier.
+Vtri tri 0 PULSE(0 1 0 {0.5/FPWM} {0.5/FPWM} 0 {1/FPWM})
+* Sinusoidal duty + 1/6 third harmonic (close to space-vector PWM, linear up to M = 1.15)
+Bda da 0 V=0.5+0.5*{M}*(sin(2*pi*{FE}*time+{PHI}*pi/180)+sin(3*(2*pi*{FE}*time+{PHI}*pi/180))/6)
+Bdb db 0 V=0.5+0.5*{M}*(sin(2*pi*{FE}*time+{PHI}*pi/180-2*pi/3)+sin(3*(2*pi*{FE}*time+{PHI}*pi/180))/6)
+Bdc dc 0 V=0.5+0.5*{M}*(sin(2*pi*{FE}*time+{PHI}*pi/180+2*pi/3)+sin(3*(2*pi*{FE}*time+{PHI}*pi/180))/6)
+
+* ---------- half-bridges with dead time ----------
+* Gate drive is referenced to each FET's own source. A FET turns on only when the duty
+* is DELTA/2 past the carrier, so both FETs of a leg are off for TDEAD at every edge.
+* Phase A
+BgHa gha sa  V=if(V(da)-V(tri)>{DELTA/2},10,0)
+BgLa gla sha V=if(V(tri)-V(da)>{DELTA/2},10,0)
+S1 vbus sa gha sa  SWFET             ; high-side FET
+S2 sa   sha gla sha SWFET            ; low-side FET
+D3 sa   vbus DBODY                   ; high-side body diode
+D4 sha  sa   DBODY                   ; low-side body diode
+Rsa sha 0 {RSH}                      ; low-side shunt (CSA input)
+* Phase B
+BgHb ghb sb  V=if(V(db)-V(tri)>{DELTA/2},10,0)
+BgLb glb shb V=if(V(tri)-V(db)>{DELTA/2},10,0)
+S3 vbus sb ghb sb  SWFET
+S4 sb   shb glb shb SWFET
+D5 sb   vbus DBODY
+D6 shb  sb   DBODY
+Rsb shb 0 {RSH}
+* Phase C
+BgHc ghc sc  V=if(V(dc)-V(tri)>{DELTA/2},10,0)
+BgLc glc shc V=if(V(tri)-V(dc)>{DELTA/2},10,0)
+S5 vbus sc ghc sc  SWFET
+S6 sc   shc glc shc SWFET
+D7 sc   vbus DBODY
+D8 shc  sc   DBODY
+Rsc shc 0 {RSH}
+
+* ---------- motor: per phase R + L + back-EMF, star point n ----------
+Ra sa na {RPH}
+La na ea {LPH}
+Bea ea n V=-{EPK}*sin(2*pi*{FE}*time)
+Rb sb nb {RPH}
+Lb nb eb {LPH}
+Beb eb n V=-{EPK}*sin(2*pi*{FE}*time-2*pi/3)
+Rc sc nc {RPH}
+Lc nc ec {LPH}
+Bec ec n V=-{EPK}*sin(2*pi*{FE}*time+2*pi/3)
+Rn n 0 1Meg                          ; DC path for the floating star point (no current flows)
+
+* ---------- device models ----------
+.model SWFET SW(Ron={RON} Roff=1Meg Vt=5 Vh=0.5)
+.model DBODY D(Is=1e-12 N=1 Rs=5m Cjo=1n Tt=20n)
+.model DSCH  D(Is=2e-5 N=1.05 Rs=8m BV=45 Ibv=1m)     ; ~0.38 V at 5 A
+.model DTVS  D(Is=1e-12 N=1 Rs=0.43 BV=31.1 Ibv=1m)   ; SMCJ28A: 31.1 V breakdown, 0.43 ohm dynamic
+
+* ---------- analysis and measurements ----------
+.tran 0 {TSTOP} 0 20n
+.meas TRAN VBUS_MAX  MAX V(vbus) FROM 5m TO {TSTOP}
+.meas TRAN VBUS_MIN  MIN V(vbus) FROM 5m TO {TSTOP}
+.meas TRAN IA_RMS    RMS I(Ra)   FROM 10m TO {TSTOP}
+.meas TRAN IPSU_AVG  AVG I(R1)   FROM 10m TO {TSTOP}
+.meas TRAN IA_RIPPLE PP  I(Ra)   FROM 20m TO {20m+1/FPWM}
+.meas TRAN ITVS_PEAK MIN I(D2)   FROM 5m TO {TSTOP}   ; TVS current flows cathode->anode, so it shows as negative
+
+* ---------- what to expect (cross-check with rig_sim.py) ----------
+* Scenario A: I(Ra) ~6 A amplitude sinusoid at 100 Hz plus PWM ripple; IPSU_AVG > 0; VBUS ~ VPSU - 0.4 V.
+* Scenario B: I(Ra) reverses (current into the bus); IPSU_AVG -> 0 (D1 blocks); V(vbus) creeps up.
+*             The rise slows as the bus rises, because the duty is fixed and the applied
+*             voltage grows with V(vbus).
+* Scenario C: same as B but V(vbus) rises far faster; ITVS_PEAK becomes negative (TVS conducting) once V(vbus) reaches ~31 V.
+.end
